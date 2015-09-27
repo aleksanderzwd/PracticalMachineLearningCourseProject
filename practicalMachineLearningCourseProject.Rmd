@@ -1,0 +1,252 @@
+---
+title: Practical Machine Learning Course Project - Classifying quality of exercise
+  using monitor data
+author: "Aleksander Zawada"
+date: "26 Sep 2015"
+output: html_document
+graphics: yes
+---
+## I. Overview
+Using devices such as *Jawbone Up*, *Nike FuelBand*, and *Fitbit* it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how *much* of a particular activity they do, but they rarely quantify *how well they do it*. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset).  
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases. 
+
+Libraries to load:  
+- **data.table** - a package used to extend the data.frame class and perform fast operations on it  
+- **dplyr** - a package used to add some extra grammar of data manipulation  
+- **caret** - a package which contains a set of functions that attempt to streamline the process for creating predictive models  
+- **corrplot** - a package which provides a graphical display of a correlation   
+- **rattle** - a package which provides a Gnome based interface to R functionality for data mining    
+
+```{r libraries, message = FALSE, warning = FALSE}
+# Load library
+library(data.table)
+library(dplyr)
+library(caret)
+library(corrplot)
+library(rattle)
+```
+
+## II. Download the data files
+Training and testing data sets are downloaded from the [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har) website.
+```{r download.files, warning = FALSE}
+# Download the data file
+data.dirname          <- "./data"
+output.files.dirname  <- "./output"
+pml.training.filepath <- paste0(data.dirname, "/", "pml-training.csv")
+pml.testing.filepath  <- paste0(data.dirname, "/", "pml-testing.csv")
+
+file.pml.training.url <-
+    "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+
+file.pml.testing.url <-
+    "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+if(!file.exists(data.dirname)) {
+    dir.create(data.dirname)
+}
+
+if(!file.exists(output.files.dirname)) {
+    dir.create(output.files.dirname)
+}
+
+if (!file.exists(pml.training.filepath)) {
+    download.file(file.pml.training.url, destfile = pml.training.filepath)
+}
+
+if (!file.exists(pml.testing.filepath)) {
+    download.file(file.pml.testing.url, destfile = pml.testing.filepath)
+}
+```
+
+## II. Load and clean the data
+The training and test CSV data files are loaded. The values: "", "NA", "NULL", "#DIV/0!" are treated as missing values.
+```{r load.files, warning = FALSE}
+# Load the CSV data files
+pml.training.dt <-
+    data.table(
+        read.csv(
+            pml.training.filepath, na.strings=c("", "NA", "NULL", "#DIV/0!")))
+
+pml.testing.dt <-
+    data.table(
+        read.csv(
+            pml.testing.filepath, na.strings=c("", "NA", "NULL", "#DIV/0!")))
+
+print(dim(pml.training.dt))
+```
+
+Remove unrelevant variables which are unlikely to be related to the predicted variable.
+```{r remove.unrelevant.variables, warning = FALSE}
+# Remove unrelevant variables - which are unlikely to be related to the
+# predicted variable
+pml.training.dt <- pml.training.dt %>%
+    select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2,
+           -cvtd_timestamp, -X, -new_window, -num_window)
+
+print(dim(pml.training.dt))
+```
+
+Remove variables which have more than 10% missing values in the training data set.
+```{r remove.na.variables, warning = FALSE}
+# Remove variables which have more than 10% missing values in the training data
+# set
+not.na.col.index <-
+    which(
+        !as.vector(
+            colSums(is.na(pml.training.dt)) > 0.1*dim(pml.training.dt)[2]))
+
+pml.training.dt <- pml.training.dt %>% select(not.na.col.index)
+
+print(dim(pml.training.dt))
+```
+
+Remove variables that have very low variance in the training data set (only numeric data).
+```{r remove.low.var.variables, warning = FALSE}
+# Remove variables that have very low variance in the training data set
+# (only numeric data)
+near.zero.var <-
+    nearZeroVar(pml.training.dt %>% select(-classe), saveMetrics = TRUE)
+
+pml.training.dt <-
+    pml.training.dt %>% select(which(!near.zero.var[["nzv"]]), classe)
+
+print(dim(pml.training.dt))
+```
+
+Remove variables that are highly correlated to one another -> 95% (only numeric data).
+```{r remove.correlated.variables, warning = FALSE, fig.align='center', fig.width=7, fig.height=7}
+# Remove variables that are highly correlated -> 95%
+# (only numeric data)
+correlation.matrix <- cor(pml.training.dt %>% select(-classe))
+corrplot(correlation.matrix, order = "FPC", method = "color", type = "lower",
+         tl.col = "black", tl.cex = 0.8)
+corr.remove.index = findCorrelation(correlation.matrix, cutoff = .95,
+                                    verbose = FALSE)
+
+pml.training.dt <- pml.training.dt %>% select(-corr.remove.index, classe)
+
+print(dim(pml.training.dt))
+```
+
+Split the training data set to training and testing part for cross validation.
+```{r split.training.dataset, warning = FALSE}
+# Split the training data set to training and testing part for cross validation
+pml.training.dt.training.index <-
+    createDataPartition(y = pml.training.dt$classe, p = 0.7, list = FALSE)
+
+pml.training.dt.training <-
+    pml.training.dt %>% filter(pml.training.dt.training.index)
+
+pml.training.dt.cv <-
+    pml.training.dt %>% filter(-pml.training.dt.training.index)
+
+print(dim(pml.training.dt.training))
+print(dim(pml.training.dt.cv))
+```
+
+## III. Analysis
+The following algorithms are used to predict the class variable:  
+- Classification Tree (rpart)
+- Random Forests
+
+```{r set.seed, warning = FALSE}
+set.seed(20150927)
+```
+
+*****
+**Classification Tree**
+```{r classification.tree, warning = FALSE, fig.align='center', fig.width=7, fig.height=7}
+# Classification Tree
+classification.tree.mod.fit <-
+    train(classe ~ ., data = pml.training.dt.training, method = "rpart")
+
+print(classification.tree.mod.fit)
+
+fancyRpartPlot(classification.tree.mod.fit$finalModel)
+
+classification.tree.prediction <-
+    predict(classification.tree.mod.fit, newdata = pml.training.dt.cv)
+
+print(
+    confusionMatrix(classification.tree.prediction, pml.training.dt.cv$classe))
+
+classification.tree.prediction.matrix.in <-
+    table(
+        predict(classification.tree.mod.fit),
+        pml.training.dt.training$classe)
+classification.tree.in.sample.error <-
+    1 - sum(diag(classification.tree.prediction.matrix.in))/
+    sum(as.vector(classification.tree.prediction.matrix.in))
+
+classification.tree.prediction.matrix.out <-
+    table(classification.tree.prediction, pml.training.dt.cv$classe)
+classification.tree.out.sample.error <-
+    1 - sum(diag(classification.tree.prediction.matrix.out))/
+    sum(as.vector(classification.tree.prediction.matrix.out))
+```
+The Classification Tree in-sample error is:
+**`r format(round(classification.tree.in.sample.error, 4), nsmall = 4)`**.  
+The Classification Tree out-sample error is:
+**`r format(round(classification.tree.out.sample.error, 4), nsmall = 4)`**.  
+
+*****
+**Random Forests**
+```{r random.forests, message = FALSE, warning = FALSE}
+# Random Forests
+random.forest.mod.fit <-
+    train(classe ~ ., method = "rf", trControl = trainControl(method = "cv"),
+          data = pml.training.dt.training, ntree = 150)
+
+random.forest.prediction <-
+    predict(random.forest.mod.fit, newdata = pml.training.dt.cv)
+
+print(
+    confusionMatrix(random.forest.prediction, pml.training.dt.cv$classe))
+
+varImp(random.forest.mod.fit)
+
+random.forest.prediction.matrix.in <-
+    table(
+        predict(random.forest.mod.fit),
+        pml.training.dt.training$classe)
+random.forest.in.sample.error <-
+    1 - sum(diag(random.forest.prediction.matrix.in))/
+    sum(as.vector(random.forest.prediction.matrix.in))
+
+random.forest.prediction.matrix.out <-
+    table(random.forest.prediction, pml.training.dt.cv$classe)
+random.forest.out.sample.error <-
+    1 - sum(diag(random.forest.prediction.matrix.out))/
+    sum(as.vector(random.forest.prediction.matrix.out))
+```
+The Random Forests in-sample error is:
+**`r format(round(random.forest.in.sample.error, 4), nsmall = 4)`**.  
+The Random Forests out-sample error is:
+**`r format(round(random.forest.out.sample.error, 4), nsmall = 4)`**.  
+
+## IV. Final prediction and conclusion
+The Random Forest algorithm was chosen as a final algorithm for prediction the *classe* variable as it has very high accuracy and very low out-sample error.
+```{r final.prediction, warning = FALSE}
+final.prediction <-
+    predict(random.forest.mod.fit, newdata = pml.testing.dt)
+
+print(final.prediction)
+```
+
+## IV. Generate output
+PML write files function.
+```{r pml.write.files.function, warning = FALSE}
+pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0(output.files.dirname, "/", "problem_id_", i, ".txt")
+        write.table(x[i],file=filename,quote=FALSE,
+                    row.names=FALSE,col.names=FALSE)
+    }
+}
+```
+
+Generate output.
+```{r generate.output, warning = FALSE}
+pml_write_files(final.prediction)
+```
